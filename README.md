@@ -4,43 +4,29 @@
 import pandas as pd
 import streamlit as st
 from io import BytesIO
-import pdblp
 
-# ---------- Bloomberg connection ----------
-@st.cache_resource
-def get_bbg_connection():
-    con = pdblp.BCon(port=8194, timeout=5000)
-    con.start()
-    return con
+from helpers.icom_nav_side import get_sides_sync
 
-def get_nav_valuation(con, tickers: list[str]) -> pd.DataFrame:
-    bbg_tickers = [t.upper() + " Equity" for t in tickers]
+st.set_page_config(page_title="ICOM Bid Filter (ftAssetCode)", layout="wide")
+st.title("Filter funds that quote at **Bid** using ICOM (ftAssetCode)")
 
-    df = con.bdp(
-        securities=bbg_tickers,
-        fields=["NAVValuation"],    # or "NAV_VALUATION"
-    )
-
-    df = df.reset_index().rename(columns={
-        "ticker": "bbg_ticker",
-        "NAVValuation": "NAVValuation",
-    })
-
-    # Strip " Equity" to match original tickers
-    df["ticker"] = df["bbg_ticker"].str.replace(" Equity", "", regex=False)
-    return df[["ticker", "NAVValuation"]]
-
-
-# ---------- Streamlit app ----------
-st.set_page_config(page_title="Bloomberg Bid/Mid Filter", layout="wide")
-st.title("Filter funds that trade at **Bid** using Bloomberg API")
+st.markdown(
+    """
+    1. Upload a file (CSV / Excel)  
+    2. Choose the column containing **ftAssetCode**  
+    3. Click **Run ICOM request**  
+    4. Download the Excel file with only **Bid** funds
+    """
+)
 
 uploaded_file = st.file_uploader(
-    "Upload a file (CSV / Excel)",
+    "Upload a file",
     type=["csv", "xlsx", "xls"],
 )
 
 df_input = None
+
+# ----- Read file ----- #
 if uploaded_file is not None:
     name = uploaded_file.name.lower()
     try:
@@ -48,63 +34,69 @@ if uploaded_file is not None:
             df_input = pd.read_excel(uploaded_file)
         else:
             df_input = pd.read_csv(uploaded_file)
+
         st.subheader("Preview of uploaded file")
         st.dataframe(df_input.head())
+
     except Exception as e:
-        st.error(f"Error reading file: {e}")
+        st.error(f"Error while reading the file: {e}")
+
 
 if df_input is not None:
-    ticker_col = st.selectbox(
-        "Column with Bloomberg tickers (e.g. EUNS GY, IEAC LN)",
+    ft_col = st.selectbox(
+        "Column with ftAssetCode",
         options=list(df_input.columns),
     )
 
-    if st.button("Run Bloomberg request"):
-        with st.spinner("Querying Bloomberg... Bloomberg Terminal must be open"):
-            con = get_bbg_connection()
-
-            tickers = (
-                df_input[ticker_col]
+    if st.button("Run ICOM request"):
+        # liste d’asset codes uniques
+        ft_codes = (
+            df_input[ft_col]
                 .dropna()
                 .astype(str)
                 .unique()
                 .tolist()
+        )
+
+        with st.spinner("Querying ICOM asynchronously..."):
+            try:
+                icom_df = get_sides_sync(ft_codes)
+            except Exception as e:
+                st.error(f"Error while calling ICOM: {e}")
+                st.stop()
+
+        if icom_df.empty:
+            st.warning("ICOM returned no data.")
+        else:
+            st.subheader("Raw ICOM result (asset_code / side)")
+            st.dataframe(icom_df)
+
+            merged = df_input.merge(
+                icom_df,
+                how="left",
+                left_on=ft_col,
+                right_on="asset_code",
             )
 
-            nav_df = get_nav_valuation(con, tickers)
+            merged["side_upper"] = merged["side"].astype(str).str.upper()
+            bid_only = merged[merged["side_upper"] == "BID"].copy()
 
-        st.subheader("Raw NAVValuation from Bloomberg")
-        st.dataframe(nav_df)
+            st.subheader("Funds quoting at **Bid**")
+            st.write(f"Rows: **{len(bid_only)}**")
+            st.dataframe(bid_only)
 
-        # Merge back to original file
-        merged = df_input.merge(
-            nav_df,
-            how="left",
-            left_on=ticker_col,
-            right_on="ticker",
-        )
+            # Export Excel
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                bid_only.to_excel(writer, sheet_name="BID_ONLY", index=False)
+            output.seek(0)
 
-        # Keep only Bid
-        bid_only = merged[
-            merged["NAVValuation"].str.upper() == "BID"
-        ].copy()
-
-        st.subheader("Funds trading at Bid")
-        st.write(f"Rows: **{len(bid_only)}**")
-        st.dataframe(bid_only)
-
-        # Export Excel
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            bid_only.to_excel(writer, sheet_name="BID_ONLY", index=False)
-        output.seek(0)
-
-        st.download_button(
-            label="📥 Download Excel (Bid only)",
-            data=output,
-            file_name="funds_bid_bloomberg.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-        )
+            st.download_button(
+                label="📥 Download Excel (Bid only)",
+                data=output,
+                file_name="funds_bid_icom.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+            )
