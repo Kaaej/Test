@@ -1,61 +1,62 @@
 # app.py
 
+# app.py
+
 import pandas as pd
 import streamlit as st
 from io import BytesIO
 
-from helpers.nav_valuation_helper import get_nav_valuation_bulk
+from helpers.nav_valuation_helper import get_nav_valuation_bulk_bbg
 
 
 # ==========================
-# CONFIG À ADAPTER
+# CONFIGURATION
 # ==========================
 
-# Colonne d'identifiant dans ton fichier d’entrée
-DEFAULT_ID_COL = "BBG Ticker"     # ex: "BBG Ticker", "RIC", "ISIN"...
-
-# Nom de la colonne Asset class dans ton fichier
+DEFAULT_BBG_COL = "BBG Ticker"       # Column containing Bloomberg tickers
 DEFAULT_ASSET_CLASS_COL = "Asset class"
 
-# Type de l’identifiant côté FBI (sourceAttributeName dans l’URL)
-FBI_HAVING_TYPE = "listingid"     # ex: "listingid", "ric", "isin", "ftassetcode", ...
-
-# Attribut cible côté FBI (targetAttributeName)
-FBI_TARGET_TYPE = "NAV_VALUATION"  # champ qui renvoie "Bid"/"Mid"/...
-
 
 # ==========================
-# APP STREAMLIT
+# STREAMLIT APPLICATION
 # ==========================
 
-st.set_page_config(page_title="FBI NAV Valuation Filter", layout="wide")
-st.title("Filter Fixed Income funds by *NAV_VALUATION* using FBI")
+st.set_page_config(page_title="Fixed Income NAVValuation Filter", layout="wide")
+st.title("Filter Fixed Income Funds by NAVValuation (via Bloomberg tickers & FBI)")
 
 st.markdown(
     """
-    **Workflow**
+    ### How this tool works
 
-    1. Upload a file (CSV / Excel) containing your funds  
-    2. Select the *Asset class* column and the identifier column  
-    3. The app keeps only rows with `Asset class = "Fixed income"`  
-    4. It calls **FBI / ftassetcodebulk2** to retrieve **NAV_VALUATION**  
-    5. It produces an Excel file with:
-        - all fixed income + NAV_VALUATION  
-        - only funds with NAV_VALUATION = `Bid`  
-        - funds where NAV_VALUATION is missing (N/A)
+    1. Upload a CSV or Excel file containing your fund list  
+    2. Select the *Asset class* and *Bloomberg ticker* columns  
+    3. The app keeps only rows where `Asset class = "Fixed Income"`  
+    4. For each Bloomberg ticker, the app generates `UPPER(ticker) + " Equity"`  
+    5. It sends a bulk request:
+
+       ```
+       ftassetcodebulk2("BBG", [...], "NAVValuation")
+       ```
+
+    6. It produces an Excel file containing:
+       - All Fixed Income funds enriched with NAVValuation  
+       - Only funds with NAVValuation = "Bid"  
+       - Funds where NAVValuation is missing (N/A)  
     """
 )
 
-uploaded_file = st.file_uploader("Upload your file", type=["xlsx", "xls", "csv"])
+uploaded_file = st.file_uploader("Upload your input file", type=["xlsx", "xls", "csv"])
 
 df_input = None
 
-# ---------- READ INPUT FILE ---------- #
+# ----------------------------------------------------------
+# Step 1 — Load input file
+# ----------------------------------------------------------
 if uploaded_file is not None:
-    name = uploaded_file.name.lower()
+    filename = uploaded_file.name.lower()
 
     try:
-        if name.endswith((".xlsx", ".xls")):
+        if filename.endswith((".xlsx", ".xls")):
             df_input = pd.read_excel(uploaded_file)
         else:
             df_input = pd.read_csv(uploaded_file)
@@ -64,103 +65,99 @@ if uploaded_file is not None:
         st.dataframe(df_input.head())
 
     except Exception as e:
-        st.error(f"Error reading file: {e}")
+        st.error(f"Unable to read file: {e}")
 
 
+# ----------------------------------------------------------
+# Step 2 — Configure columns
+# ----------------------------------------------------------
 if df_input is not None:
-    cols = df_input.columns.tolist()
+    columns = df_input.columns.tolist()
 
     asset_col = st.selectbox(
-        "Column with Asset class",
-        options=cols,
-        index=cols.index(DEFAULT_ASSET_CLASS_COL) if DEFAULT_ASSET_CLASS_COL in cols else 0,
+        "Select the Asset class column:",
+        options=columns,
+        index=columns.index(DEFAULT_ASSET_CLASS_COL)
+        if DEFAULT_ASSET_CLASS_COL in columns else 0,
     )
 
-    id_col = st.selectbox(
-        "Identifier column (used to query FBI)",
-        options=cols,
-        index=cols.index(DEFAULT_ID_COL) if DEFAULT_ID_COL in cols else 0,
+    bbg_col = st.selectbox(
+        "Select the Bloomberg ticker column:",
+        options=columns,
+        index=columns.index(DEFAULT_BBG_COL)
+        if DEFAULT_BBG_COL in columns else 0,
     )
 
-    st.write(f"FBI having_type: `{FBI_HAVING_TYPE}`, target_type: `{FBI_TARGET_TYPE}`")
+    # ----------------------------------------------------------
+    # Step 3 — Run computation
+    # ----------------------------------------------------------
+    if st.button("Run NAVValuation Filter"):
+        # ---- Filter Fixed Income ----
+        df_fi = df_input[
+            df_input[asset_col].astype(str).str.upper() == "FIXED INCOME"
+        ].copy()
 
-    if st.button("Run FBI NAV_VALUATION filter"):
-        # ---------- FILTER FIXED INCOME ---------- #
-        asset_series = df_input[asset_col].astype(str)
-        df_fixed = df_input[asset_series.str.upper() == "FIXED INCOME"].copy()
+        if df_fi.empty:
+            st.warning('No rows found with Asset class = "Fixed Income".')
+            st.stop()
 
-        if df_fixed.empty:
-            st.warning('No rows with Asset class "Fixed income" found.')
-        else:
-            st.write(f"Rows with Asset class = Fixed income: **{len(df_fixed)}**")
+        st.write(f"Rows detected as Fixed Income: **{len(df_fi)}**")
 
-            # ---------- PREPARE IDENTIFIERS ---------- #
-            identifiers = (
-                df_fixed[id_col]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
+        # ---- Build valid Bloomberg tickers for FBI ----
+        bbg_list = (
+            df_fi[bbg_col]
+            .astype(str)
+            .str.upper()
+            .str.strip()
+            .apply(lambda x: f"{x} Equity")
+            .tolist()
+        )
 
-            if not identifiers:
-                st.error("No identifiers found in the selected identifier column.")
+        # ---- Call FBI ----
+        with st.spinner("Requesting NAVValuation from FBI (ftassetcodebulk2)..."):
+            try:
+                nav_map = get_nav_valuation_bulk_bbg(bbg_list)
+            except Exception as e:
+                st.error(f"Error calling FBI: {e}")
                 st.stop()
 
-            # ---------- CALL FBI via ftassetcodebulk2 ---------- #
-            with st.spinner("Calling FBI (ftassetcodebulk2)..."):
-                try:
-                    nav_map = get_nav_valuation_bulk(
-                        having_type=FBI_HAVING_TYPE,
-                        identifiers=identifiers,
-                        target_type=FBI_TARGET_TYPE,
-                    )
-                except Exception as e:
-                    st.error(f"Error while calling FBI: {e}")
-                    st.stop()
+        # ---- Map NAVValuation back to DataFrame ----
+        df_fi["NAVValuation"] = [
+            nav_map.get(ticker, None) for ticker in bbg_list
+        ]
 
-            # ---------- MAP NAV_VALUATION BACK TO ROWS ---------- #
-            df_fixed["NAV_VALUATION"] = (
-                df_fixed[id_col]
-                .astype(str)
-                .map(nav_map)       # nav_map[identifier] -> NAV_VALUATION
-            )
+        st.subheader("Fixed Income funds enriched with NAVValuation")
+        st.dataframe(df_fi)
 
-            # Show enriched fixed-income data
-            st.subheader("Fixed income funds enriched with NAV_VALUATION")
-            st.dataframe(df_fixed)
+        # ---- Build subsets ----
+        nav_upper = df_fi["NAVValuation"].astype(str).str.upper()
 
-            # ---------- BUILD FILTERS (BID / N/A) ---------- #
-            nav_upper = df_fixed["NAV_VALUATION"].astype(str).str.strip().str.upper()
+        df_bid = df_fi[nav_upper == "BID"]
+        df_na = df_fi[df_fi["NAVValuation"].isna() | (nav_upper == "") | (nav_upper == "NAN")]
 
-            df_bid = df_fixed[nav_upper == "BID"].copy()
+        st.subheader("Funds with NAVValuation = 'Bid'")
+        st.write(f"Count: **{len(df_bid)}**")
+        st.dataframe(df_bid)
 
-            df_na = df_fixed[
-                df_fixed["NAV_VALUATION"].isna()
-                | (nav_upper == "")
-                | (nav_upper == "NAN")
-            ].copy()
+        st.subheader("Funds with NAVValuation missing (N/A)")
+        st.write(f"Count: **{len(df_na)}**")
+        st.dataframe(df_na)
 
-            st.subheader("Funds with NAV_VALUATION = 'Bid'")
-            st.write(f"Count: **{len(df_bid)}**")
-            st.dataframe(df_bid)
+        # ----------------------------------------------------------
+        # Step 4 — Generate output Excel
+        # ----------------------------------------------------------
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_input.to_excel(writer, sheet_name="INPUT_RAW", index=False)
+            df_fi.to_excel(writer, sheet_name="FIXED_INCOME_ALL", index=False)
+            df_bid.to_excel(writer, sheet_name="ONLY_BID", index=False)
+            df_na.to_excel(writer, sheet_name="NAV_NA", index=False)
 
-            st.subheader("Funds with NAV_VALUATION N/A (missing / empty)")
-            st.write(f"Count: **{len(df_na)}**")
-            st.dataframe(df_na)
+        output.seek(0)
 
-            # ---------- EXPORT TO EXCEL ---------- #
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                df_input.to_excel(writer, sheet_name="INPUT_RAW", index=False)
-                df_fixed.to_excel(writer, sheet_name="FIXED_INCOME_ALL", index=False)
-                df_bid.to_excel(writer, sheet_name="FIXED_INCOME_BID", index=False)
-                df_na.to_excel(writer, sheet_name="FIXED_INCOME_NAV_NA", index=False)
-            output.seek(0)
-
-            st.download_button(
-                label="📥 Download Excel (Fixed income + NAV_VALUATION)",
-                data=output,
-                file_name="fixed_income_nav_valuation.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.download_button(
+            label="📥 Download Excel Output",
+            data=output,
+            file_name="fixed_income_navvaluation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
