@@ -100,3 +100,68 @@ if df_input is not None:
                     "spreadsheetml.sheet"
                 ),
             )
+
+
+
+
+NAV SIDE : 
+# helpers/icom_nav_side.py
+import asyncio
+from typing import List, Dict
+import pandas as pd
+
+from .icom_session import create_session
+
+
+# -------------------------
+#  RÉCUPÉRATION D’UN SEUL CODE
+# -------------------------
+
+async def fetch_one_side_from_sql(ft_asset_code: str) -> Dict[str, str]:
+    session = await create_session()
+
+    # TODO — ADAPTER ICI : table, colonne ftAssetCode, colonne du side (BID/MID)
+    sql = f"""
+        SELECT
+            FTASSET_CODE        AS asset_code,
+            NAV_VALUATION_SIDE  AS side
+        FROM FUND_NAV
+        WHERE FTASSET_CODE = '{ft_asset_code}'
+    """
+
+    rows = await session.sqlstatement(sql)
+
+    # Conversion générique : rows est un DataList → on le transforme en dict
+    rows_list = [row for row in rows]
+
+    if not rows_list:
+        return {"asset_code": ft_asset_code, "side": None}
+
+    row0 = rows_list[0]
+
+    return {
+        "asset_code": row0.get("asset_code", ft_asset_code),
+        "side": row0.get("side"),
+    }
+
+
+# -------------------------
+#  RÉCUPÉRATION PAR LOTS
+# -------------------------
+
+async def fetch_all_sides_from_sql(ft_asset_codes: List[str]) -> pd.DataFrame:
+    tasks = [fetch_one_side_from_sql(code) for code in ft_asset_codes]
+    results = await asyncio.gather(*tasks)
+    return pd.DataFrame(results)
+
+
+def get_sides_sync(ft_asset_codes: List[str]) -> pd.DataFrame:
+    """
+    Wrapper synchronisé pour Streamlit.
+    Streamlit ne gère pas l'async → on utilise asyncio.run.
+    """
+    if not ft_asset_codes:
+        return pd.DataFrame(columns=["asset_code", "side"])
+
+    return asyncio.run(fetch_all_sides_from_sql(ft_asset_codes))
+
