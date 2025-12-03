@@ -1,40 +1,42 @@
 # helpers/nav_valuation_helper.py
 
+# helpers/nav_valuation_helper.py
+
 import asyncio
 from typing import List, Dict
 
 from .fbi_helper import ftassetcodebulk2
 
 
-def get_nav_valuation_bulk(
-    having_type: str,
-    identifiers: List[str],
-    target_type: str = "NAV_VALUATION",
-) -> Dict[str, str]:
+def get_nav_valuation_bulk_bbg(identifiers: List[str]) -> Dict[str, str]:
     """
-    Synchronous wrapper around fbi_helper.ftassetcodebulk2.
+    Synchronous wrapper around ftassetcodebulk2 for Bloomberg tickers.
 
     Parameters
     ----------
-    having_type : str
-        Source attribute name in FBI (e.g. 'listingid', 'ric', 'isin', 'ftassetcode', ...)
     identifiers : list[str]
-        List of identifiers to query.
-    target_type : str
-        Target attribute name in FBI, here 'NAV_VALUATION' by default.
+        List of Bloomberg tickers already formatted like: "IEAC LN Equity".
 
     Returns
     -------
     dict[str, str]
-        Mapping {identifier -> NAV_VALUATION string}
+        Mapping such as:
+        {
+            "IEAC LN Equity": "Bid",
+            "XYZ LN Equity": "Mid",
+            ...
+        }
+        Missing or unknown tickers return None.
     """
 
     if not identifiers:
         return {}
 
     async def _run():
-        # ftassetcodebulk2 is async in your fbi_helper
-        return await ftassetcodebulk2(having_type, identifiers, target_type)
+        # Call FBI using the same convention as your Excel ftAssetCode:
+        # sourceAttributeName = "BBG"
+        # targetAttributeName = "NAVValuation"
+        return await ftassetcodebulk2("BBG", identifiers, "NAVValuation")
 
-    # In a classic script / Streamlit app there is no running loop, so asyncio.run is fine.
+    # Streamlit runs in a non-async context → asyncio.run() is appropriate
     return asyncio.run(_run())
